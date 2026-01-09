@@ -1,0 +1,201 @@
+\documentclass[11pt,a4paper]{article}
+
+\usepackage[T1]{fontenc}
+\usepackage[utf8]{inputenc}
+\usepackage{lmodern}
+\usepackage{geometry}
+\geometry{margin=1in}
+\usepackage{hyperref}
+\usepackage{booktabs}
+\usepackage{longtable}
+\usepackage{array}
+\usepackage{graphicx}
+\usepackage{xcolor}
+\usepackage{amsmath}
+\usepackage{microtype}
+
+\sloppy
+
+\hypersetup{
+  colorlinks=true,
+  linkcolor=blue,
+  urlcolor=blue,
+  citecolor=blue
+}
+
+\setlength{\parindent}{0pt}
+\setlength{\parskip}{6pt}
+
+\title{Unified Explainable AI Interface:\\ Multi-modal (Audio + Image) Classification with Comparative Explainable AI}
+\author{TD Group: DIA 5 \\ Team: Hugo ROBIN, Ghadi SALAMEH, Hector MELL MARIOLLE, Jules SAYAD-BARTH}
+\date{2026-01-05}
+
+\begin{document}
+\maketitle
+
+\section*{Abstract}
+This project implements a unified Streamlit application for inference and explainable AI (XAI) across two modalities: (i) audio deepfake detection from \texttt{.wav} files and (ii) chest X-Ray multi-label pathology scoring from \texttt{.png/.jpg/.jpeg} images. The X-Ray pipeline uses two pre-trained models from Hugging Face: \texttt{shreydan/CheXpert-5-convnextv2-tiny-384} (a ConvNeXtV2 model fine-tuned on CheXpert with AUROC scores up to 0.93) and \texttt{codewithdark/vit-chest-xray} (a Vision Transformer achieving 98.46\% validation accuracy). The system exposes LIME, SHAP, and Grad-CAM explanations, and introduces a ViT-specific attention rollout heatmap when Grad-CAM is not applicable. A central design objective is to satisfy the TD requirements through a single workflow that automatically detects the input modality, filters incompatible explanation methods, and provides a side-by-side comparison view. The audio pipeline converts uploaded waveforms into MEL spectrogram images (224$\times$224) and applies a TensorFlow/Keras SavedModel stored locally. The image pipeline loads PyTorch models through the Transformers library from local model directories and computes multi-label probabilities via a sigmoid transformation over logits. The application implements a comparison view that renders multiple XAI outputs for the same input and caches results in the Streamlit session state to avoid expensive recomputation. All implementation claims in this report are backed by the repository artifacts referenced as \texttt{path::function}.
+
+\section{Introduction}
+The project addresses two complementary classification settings. First, deepfake audio detection aims to distinguish authentic speech from synthetic or manipulated audio; such models often operate as black boxes, motivating explainability methods to improve transparency and trust during a demonstration. Second, chest X-Ray analysis is implemented as a multi-label pathology scoring task (not a binary ``cancer'' classifier), where model outputs represent probabilities for a fixed set of thoracic findings.
+
+The TD specification requires multi-modal inputs, mandatory XAI methods (LIME, SHAP, Grad-CAM), automatic filtering of incompatible choices, and a comparison/visualization area. This repository consolidates these requirements into a single Streamlit interface with a unified upload step and a consistent ``predict then explain'' flow.
+
+\section{Repository Analysis (Evidence-Based)}
+\subsection{User Interface Framework}
+The graphical user interface is implemented with Streamlit (see: \texttt{Streamlit/app.py::main}), and dependencies pin \texttt{streamlit==1.10.0} (see: \texttt{Streamlit/requirements.txt}). The application provides multiple pages in the sidebar, including a unified page named ``Unified'' (see: \texttt{Streamlit/app.py::main}).
+
+\subsection{Audio Pipeline}
+The audio pipeline accepts \texttt{.wav} uploads and writes bytes to disk under \texttt{audio\_files/} (see: \texttt{Streamlit/app.py::save\_audio\_bytes}). Feature extraction is performed by computing a MEL spectrogram with Librosa and rendering it deterministically as a 224$\times$224 RGB image using a fixed Matplotlib figure size and DPI (see: \texttt{Streamlit/app.py::create\_spectrogram}). The classifier is loaded from a local TensorFlow SavedModel directory \texttt{Streamlit/saved\_model/model/} (see: \texttt{Streamlit/app.py::homepage\_audio} and \texttt{Streamlit/app.py::unified\_page}). Inference is executed on a single example batch by normalizing the spectrogram image to $[0,1]$ and calling \texttt{model.predict} (see: \texttt{Streamlit/app.py::predictions\_audio}). Output classes are \texttt{["real","fake"]} (see: \texttt{Streamlit/app.py::audio\_class\_names}).
+
+\subsection{Image (X-Ray) Pipeline}
+The X-Ray pipeline loads one of two offline Hugging Face snapshots stored under \texttt{Streamlit/saved\_model/}: the directories \texttt{chexpert\_convnextv2\_tiny\_384} and \texttt{vit\_chest\_xray}. Path constants are defined in \texttt{Streamlit/app.py} as \texttt{XRAY\_CONVNEXT\_DIR} and \texttt{XRAY\_VIT\_DIR}. Both models are loaded with \texttt{AutoImageProcessor} and \texttt{AutoModelForImageClassification} from the Transformers library, using \texttt{local\_files\_only=True} and \texttt{torch.float32}, then moved to CPU. The loading logic is in function \texttt{load\_xray\_model}. Preprocessing converts inputs to RGB and applies the HF processor; the code also creates a grayscale preview for UI display, as implemented in \texttt{preprocess\_xray}. Inference returns logits which are transformed into multi-label probabilities using \texttt{torch.sigmoid}, as implemented in \texttt{predictions\_xray}. Labels are enforced explicitly by writing \texttt{id2label} and \texttt{label2id} into the model configuration. The label sets are defined in constants \texttt{CONVNEXT\_CHEXPERT5\_LABELS} and \texttt{VIT\_CHEST\_XRAY\_LABELS}.
+
+\subsubsection{Pre-trained Model References}
+
+The two X-Ray models used in this project are publicly available on Hugging Face and are cited below with their original training details.
+
+\textbf{Model 1: CheXpert-5 ConvNeXtV2 Tiny (384).}
+This model is published under the identifier \texttt{shreydan/CheXpert-5-convnextv2-tiny-384}\footnote{\url{https://huggingface.co/shreydan/CheXpert-5-convnextv2-tiny-384}}. It is a fine-tuned version of \texttt{facebook/convnextv2-tiny-22k-384} on the CheXpert dataset. The model outputs multi-label probabilities for five thoracic findings: Atelectasis, Cardiomegaly, Consolidation, Edema, and Pleural Effusion. According to the model card, evaluation AUROC scores are: Atelectasis 0.7943, Cardiomegaly 0.8187, Consolidation 0.9269, Edema 0.9233, and Pleural Effusion 0.9315. The model contains approximately 27.9 million parameters and is distributed under the Apache-2.0 license. Training hyperparameters included a learning rate of 0.001, batch size of 32, six epochs, and a cosine learning rate scheduler with 2500 warmup steps.
+
+\textbf{Model 2: ViT Chest X-Ray.}
+This model is published under the identifier \texttt{codewithdark/vit-chest-xray}\footnote{\url{https://huggingface.co/codewithdark/vit-chest-xray}}. It is a fine-tuned Vision Transformer (ViT) based on \texttt{google/vit-base-patch16-224-in21k}, also trained on the CheXpert dataset. The model outputs multi-label probabilities for five classes: Cardiomegaly, Edema, Consolidation, Pneumonia, and No Finding. According to the model card, the final validation accuracy is 98.46\% with a validation loss of 0.0980. The model contains approximately 85.8 million parameters and is distributed under the MIT license. Training hyperparameters included the AdamW optimizer with a learning rate of $3 \times 10^{-5}$, batch size of 32, ten epochs, and mixed precision training.
+
+Table~\ref{tab:xray_models} summarizes the key characteristics of both X-Ray models.
+
+\begin{table}[h]
+\centering
+\caption{Summary of X-Ray models used in this project.}
+\label{tab:xray_models}
+\begin{tabular}{@{}p{3.5cm}p{5.5cm}p{5.5cm}@{}}
+\toprule
+\textbf{Characteristic} & \textbf{ConvNeXtV2 (shreydan)} & \textbf{ViT (codewithdark)} \\
+\midrule
+Hugging Face ID & shreydan/CheXpert-5-convnextv2-tiny-384 & codewithdark/vit-chest-xray \\
+Base Model & facebook/convnextv2-tiny-22k-384 & google/vit-base-patch16-224-in21k \\
+Architecture & ConvNeXtV2 Tiny & Vision Transformer (ViT-Base) \\
+Parameters & 27.9M & 85.8M \\
+Input Size & 384$\times$384 & 224$\times$224 \\
+Output Labels & Atelectasis, Cardiomegaly, Consolidation, Edema, Pleural Effusion & Cardiomegaly, Edema, Consolidation, Pneumonia, No Finding \\
+Best Metric & AUROC up to 0.9315 (Pleural Effusion) & Validation Accuracy 98.46\% \\
+Training Dataset & CheXpert & CheXpert \\
+License & Apache-2.0 & MIT \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsection{Explainability Implementations and Invocation}
+LIME is implemented for audio spectrogram images and X-Ray images using the \texttt{LimeImageExplainer} class from the \texttt{lime.lime\_image} module. The audio implementation is in \texttt{lime\_predict\_audio} and the X-Ray implementation is in \texttt{lime\_predict\_xray}, both located in \texttt{Streamlit/app.py}. Both paths define a wrapper \texttt{predict\_fn} to enforce stable dtype and batch shape before calling the underlying model.
+
+SHAP explanations are implemented using a model-agnostic image masker from \texttt{shap.maskers.Image} with a blur baseline and \texttt{shap.Explainer}. The audio implementation is in \texttt{shap\_predict\_audio} and the X-Ray implementation is in \texttt{shap\_predict\_xray}, both in \texttt{Streamlit/app.py}. The X-Ray SHAP wrapper passes images through the HF processor and returns multi-label probabilities via sigmoid.
+
+Grad-CAM is implemented in two contexts. For audio, Grad-CAM is computed on the actual TensorFlow/Keras classifier by locating the last \texttt{Conv2D} layer and backpropagating gradients with \texttt{tf.GradientTape}; see function \texttt{grad\_predict\_audio} in \texttt{Streamlit/app.py}. For X-Ray, Grad-CAM is implemented for convolutional HF models via PyTorch forward/backward hooks over the last \texttt{Conv2d} module encountered; see function \texttt{grad\_cam\_hf\_image\_model} in \texttt{Streamlit/app.py}. For ViT models, the repository provides an attention rollout heatmap based on transformer attentions, as a practical explanation alternative where Grad-CAM is not applicable; see function \texttt{vit\_attention\_rollout\_xray} in \texttt{Streamlit/app.py}.
+
+\subsection{Compatibility Filtering (Automatic)}
+Automatic XAI compatibility filtering is implemented in the unified UI. The modality is detected by checking the uploaded filename extension; the method selector is built from modality- and model-specific lists (see: \texttt{Streamlit/app.py::unified\_page}). For X-Ray, when the ViT model is selected, the UI offers LIME, SHAP, and Attention Rollout, while Grad-CAM is omitted; for ConvNeXtV2, the UI offers LIME, SHAP, and Grad-CAM (see: \texttt{Streamlit/app.py::unified\_page}).
+
+\subsection{Comparison / Side-by-Side Visualization}
+The comparison view is implemented in the unified page as a ``Compare'' mode. Multiple XAI outputs are rendered side-by-side using Streamlit columns, and the predicted label or top pathology is displayed alongside the explanations. The implementation is in \texttt{unified\_page} within \texttt{Streamlit/app.py}, specifically in the helper functions \texttt{\_show\_audio\_compare} and \texttt{\_show\_xray\_compare}. The repository also provides a Streamlit 1.10 compatibility fallback because \texttt{st.tabs} may be unavailable; in that case a \texttt{st.radio} view selector is used.
+
+\subsection{Model Loading, Checkpoints, and Environment}
+Audio weights are stored as a TensorFlow SavedModel in the directory \texttt{Streamlit/saved\_model/model/}. X-Ray weights are stored as offline HF snapshots containing \texttt{config.json}, \texttt{model.safetensors}, and \texttt{preprocessor\_config.json}, located under \texttt{Streamlit/saved\_model/}. The environment is constrained by TensorFlow 2.6.2 and NumPy 1.19.5; PyTorch is pinned to 1.13.1 to maintain compatibility with the required typing extensions. These constraints are specified in \texttt{Streamlit/requirements.txt}. The code selects CPU execution for X-Ray models in function \texttt{load\_xray\_model}; the audio TensorFlow model uses the default device behavior.
+
+\subsection{Original Repositories and Integration (Evidence)}
+The README references assets from an external deepfake audio XAI repository via image URLs. The About page (function \texttt{about}) accurately describes the current runtime: a single TensorFlow/Keras CNN classifier for audio deepfake detection (based on the methodology from the Deepfake-Audio-Detection-with-XAI repository), and two Hugging Face models for X-Ray pathology detection (ConvNeXtV2 and ViT). The original audio repository explored multiple architectures (VGG16, MobileNet, ResNet, Custom CNN); this implementation uses a single trained model. The X-Ray models are offline snapshots from Hugging Face with explicit model citations in the About page.
+
+\section{Requirements and Objectives Traceability}
+\begin{longtable}{@{}p{0.20\textwidth}p{0.19\textwidth}p{0.46\textwidth}p{0.10\textwidth}@{}}
+\toprule
+\textbf{Requirement} & \textbf{Implementation} & \textbf{Evidence (file/function)} & \textbf{Status} \\
+\midrule
+\endhead
+Multi-modal upload (\texttt{.wav} + X-Ray image) & Single uploader with extension-based routing & \texttt{Streamlit/app.py::unified\_page} & OK \\
+Model selection & X-Ray: ConvNeXtV2 vs ViT; Audio: single model (no selector) & \texttt{Streamlit/app.py::unified\_page}, \texttt{Streamlit/app.py::load\_xray\_model} & Partial \\
+LIME support & Audio and image LIME explainers & \texttt{Streamlit/app.py::lime\_predict\_audio}, \texttt{Streamlit/app.py::lime\_predict\_xray} & OK \\
+SHAP support & Audio and image SHAP explainers with image masker & \texttt{Streamlit/app.py::shap\_predict\_audio}, \texttt{Streamlit/app.py::shap\_predict\_xray} & OK \\
+Grad-CAM support & Audio Grad-CAM (Keras Conv2D), X-Ray Grad-CAM for conv HF models & \texttt{Streamlit/app.py::grad\_predict\_audio}, \texttt{Streamlit/app.py::grad\_cam\_hf\_image\_model} & OK \\
+Automatic compatibility filtering & XAI list depends on modality and X-Ray architecture & \texttt{Streamlit/app.py::unified\_page} & OK \\
+Basic workflow (input$\rightarrow$preprocess$\rightarrow$predict$\rightarrow$explain$\rightarrow$render) & Implemented for both modalities in Unified & \texttt{Streamlit/app.py::create\_spectrogram}, \texttt{predictions\_audio}, \texttt{preprocess\_xray}, \texttt{predictions\_xray}, \texttt{unified\_page} & OK \\
+Comparison/visualization tab & Side-by-side columns in Compare view; includes prediction context & \texttt{Streamlit/app.py::unified\_page} (\texttt{\_show\_*\_compare}) & OK \\
+Documentation and setup & README + pinned requirements + run instructions & \texttt{README.md}, \texttt{Streamlit/requirements.txt} & OK \\
+\bottomrule
+\end{longtable}
+
+\section{System Architecture}
+Figure \ref{fig:arch} summarizes the core components and their connections. The system is implemented as a single Streamlit module, with the unified page acting as the controller that selects pipelines and explanation strategies.
+
+\begin{figure}[h]
+\centering
+\fbox{%
+\begin{minipage}{0.93\linewidth}
+\textbf{Architecture (high-level)}\\
+UI (Streamlit) $\rightarrow$ Input Handler (unified\_page) $\rightarrow$ Preprocessing (audio/image) $\rightarrow$ Model Inference (TF/PyTorch) $\rightarrow$ XAI Engine (LIME/SHAP/Grad-CAM/Attention) $\rightarrow$ Visualization \& Compare (columns, overlays)\\
+Evidence: \texttt{Streamlit/app.py::main}, \texttt{Streamlit/app.py::unified\_page}.
+\end{minipage}}
+\caption{High-level system architecture (text diagram).}
+\label{fig:arch}
+\end{figure}
+
+\section{Implementation Details}
+\subsection{Unified Interface (UI/UX Flow)}
+The unified interface is implemented in the function \texttt{unified\_page} within \texttt{Streamlit/app.py}. It provides a single uploader, performs modality detection by checking the filename suffix, then invokes the corresponding preprocessing and inference pipeline. The page renders three views (Prediction, Explain, Compare) using \texttt{st.tabs} when available and a radio fallback for Streamlit 1.10 compatibility. The user selects explanation methods via a multiselect whose options are automatically filtered based on modality and X-Ray model selection.
+
+\subsection{Audio Deepfake Detection Pipeline}
+Uploaded audio is stored to disk and transformed into a MEL spectrogram image using Librosa. The spectrogram rendering is deterministic and fixed to 224$\times$224 pixels to preserve consistency with the model's training pipeline; see function \texttt{create\_spectrogram}. The classifier is a TensorFlow/Keras SavedModel loaded from \texttt{Streamlit/saved\_model/model/} and used in batch size 1 inference; see function \texttt{predictions\_audio}. The audio detection approach is based on the methodology from the Deepfake-Audio-Detection-with-XAI repository, which explores multiple architectures (VGG16, MobileNet, ResNet, Custom CNN) for spectrogram-based classification.
+
+\subsection{Lung Pathology X-Ray Pipeline}
+The X-Ray pipeline uses Transformers to load local model snapshots obtained from Hugging Face. Input images are converted to RGB and processed via the HF image processor; see function \texttt{preprocess\_xray}. Inference outputs are multi-label probabilities computed by applying a sigmoid to logits; see function \texttt{predictions\_xray}. Labels are explicitly enforced to match the project-defined pathology sets in function \texttt{load\_xray\_model}.
+
+The first model, \texttt{shreydan/CheXpert-5-convnextv2-tiny-384}, is a ConvNeXtV2 architecture fine-tuned on CheXpert with five output labels: Atelectasis, Cardiomegaly, Consolidation, Edema, and Pleural Effusion. The second model, \texttt{codewithdark/vit-chest-xray}, is a Vision Transformer fine-tuned on CheXpert with five output labels: Cardiomegaly, Edema, Consolidation, Pneumonia, and No Finding. Both models were trained on the CheXpert dataset and achieve strong performance on their respective evaluation metrics (see Section 2.3.1 for detailed metrics). The repository stores offline snapshots of these models under \texttt{Streamlit/saved\_model/}.
+
+\subsection{Explainability Methods (XAI)}
+LIME operates on image-like inputs in both modalities. The audio spectrogram is treated as an image and explained via superpixel perturbations; see function \texttt{lime\_predict\_audio}. A methodological limitation is that LIME superpixels on spectrograms do not map cleanly to time-frequency structure; results should be interpreted as approximate regions of interest rather than precise frequency bands. X-Ray LIME perturbs the input image and routes perturbed samples through the HF processor and model; see function \texttt{lime\_predict\_xray}.
+
+SHAP uses an image masker with a blur baseline and a model-agnostic explainer for both modalities; see functions \texttt{shap\_predict\_audio} and \texttt{shap\_predict\_xray}. Evaluation budgets are specified via the \texttt{max\_evals} parameter.
+
+Grad-CAM is implemented for the actual audio classifier model using function \texttt{grad\_predict\_audio} and for convolutional HF image models using function \texttt{grad\_cam\_hf\_image\_model}. For ViT models, the code provides attention rollout via function \texttt{vit\_attention\_rollout\_xray} and the UI excludes Grad-CAM accordingly.
+
+\subsection{Compatibility Filtering Logic}
+Compatibility is expressed as UI-level option selection rather than a separate registry. In the unified page, the XAI options are set to LIME, SHAP, and Grad-CAM for audio; LIME, SHAP, and Grad-CAM for ConvNeXtV2; and LIME, SHAP, and Attention Rollout for ViT. This prevents invalid selections without requiring runtime error handling; see function \texttt{unified\_page}.
+
+\subsection{Comparison / Visualization}
+The comparison view renders multiple explanations side-by-side in columns and includes the classification result as context text. The implementation caches computed explainers and heatmaps in \texttt{st.session\_state} to reduce runtime cost when the same input is explored repeatedly; see function \texttt{\_xai\_cached} and its usage in \texttt{unified\_page}. For SHAP in comparison, the visualization uses Matplotlib overlays because raw SHAP arrays include negative values that are not directly displayable via \texttt{st.image} in Streamlit 1.10.
+
+\section{Refactoring and Integration Decisions}
+The repository consolidates multi-modal inference and XAI into a single Streamlit file. Evidence of integration from earlier codebases appears in the README assets and in the legacy text of the About page. In the current code, the engineering trade-off favors TD deliverability (single entry point, local checkpoints, deterministic preprocessing, UI compatibility workarounds) over modularity and automated testing. The code also pins dependency versions to reconcile TensorFlow and PyTorch compatibility constraints (see: \texttt{Streamlit/requirements.txt}).
+
+\section{Testing and Validation}
+No automated tests are found in the repository (no \texttt{tests/} directory and no test runner configuration). A minimal validation plan for a TD demonstration should include: modality routing checks (audio vs image), sanity checks on output shapes and probability ranges, successful generation of each XAI method for at least one example, verification that incompatible methods are not offered in the UI, and confirmation that the comparison view displays at least two methods side-by-side for a single input.
+
+\section{Results and Demonstration Workflow}
+The repository contains example audio files in the project root: \texttt{cascade\_real\_5s.wav} and \texttt{cascade\_fake\_5s.wav}, which can be used for demonstration. A recommended demo flow is as follows: launch the app, select the unified page, upload an audio file to show prediction and at least two explanations (e.g., LIME and Grad-CAM), then upload an X-Ray image, select the ConvNeXtV2 model to show Grad-CAM plus LIME and SHAP, and finally switch to the Compare view to show side-by-side explanations with the prediction context text. All steps correspond to existing UI behavior implemented in functions \texttt{main} and \texttt{unified\_page}.
+
+\section{Limitations and Future Work}
+The application uses computationally expensive explainers, particularly SHAP, and mitigates cost only through session caching rather than offline precomputation. The Grad-CAM implementation for HF models selects the last convolutional layer encountered, which is a reasonable heuristic but may not always yield the most interpretable maps across architectures. The X-Ray task implemented in this repository is multi-label thoracic pathology scoring with five labels for each model snapshot; a strict ``lung cancer detection'' classifier is not found in the current runtime logic. Future work should consider modularization, automated tests, exportable results (images/reports), and explicit calibration or thresholding for pathology decision support.
+
+\section{Setup and Reproducibility}
+Dependencies and version constraints are specified in \texttt{Streamlit/requirements.txt}. The README provides run commands: \texttt{pip install -r Streamlit/requirements.txt} followed by \texttt{cd Streamlit} and \texttt{streamlit run app.py} (see: \texttt{README.md}). Local model directories required at runtime are stored under \texttt{Streamlit/saved\_model/} (see repository tree).
+
+\section*{Generative AI Usage Statement}
+We used Cursor AI with Claude Opus 4.5 to assist with code corrections and improvements after an initial implementation of the solution. We also used ChatGPT to help understand the project requirements and to provide feedback on our code and report for potential mistakes we might have missed during review. We transparently disclose the use of these generative AI tools and remain fully responsible for all technical decisions, validation, and submitted content.
+
+\section*{References}
+\begin{enumerate}
+\item \textbf{Deepfake-Audio-Detection-with-XAI}. Guri10/Deepfake-Audio-Detection-with-XAI. GitHub Repository. Available at: \url{https://github.com/Guri10/Deepfake-Audio-Detection-with-XAI}. Original audio deepfake detection project exploring VGG16, MobileNet, ResNet, and Custom CNN architectures with LIME, Grad-CAM, and SHAP explanations. Authors: Aamir Hullur, Atharva Gurav, Aditi Govindu, Parth Godse.
+
+\item \textbf{shreydan/CheXpert-5-convnextv2-tiny-384}. Hugging Face Model Hub. Available at: \url{https://huggingface.co/shreydan/CheXpert-5-convnextv2-tiny-384}. Fine-tuned ConvNeXtV2 Tiny model on CheXpert dataset for multi-label thoracic pathology classification (5 labels). Base model: facebook/convnextv2-tiny-22k-384. License: Apache-2.0.
+
+\item \textbf{codewithdark/vit-chest-xray}. Hugging Face Model Hub. Available at: \url{https://huggingface.co/codewithdark/vit-chest-xray}. Fine-tuned Vision Transformer (ViT) on CheXpert dataset for chest X-ray classification (5 labels). Base model: google/vit-base-patch16-224-in21k. License: MIT.
+
+\item \textbf{CheXpert Dataset}. Irvin, J., et al. (2019). CheXpert: A Large Chest Radiograph Dataset with Uncertainty Labels and Expert Comparison. Proceedings of the AAAI Conference on Artificial Intelligence.
+
+\item \textbf{LIME}. Ribeiro, M. T., Singh, S., \& Guestrin, C. (2016). ``Why Should I Trust You?'': Explaining the Predictions of Any Classifier. Proceedings of the 22nd ACM SIGKDD International Conference on Knowledge Discovery and Data Mining.
+
+\item \textbf{SHAP}. Lundberg, S. M., \& Lee, S. I. (2017). A Unified Approach to Interpreting Model Predictions. Advances in Neural Information Processing Systems 30.
+
+\item \textbf{Grad-CAM}. Selvaraju, R. R., et al. (2017). Grad-CAM: Visual Explanations from Deep Networks via Gradient-based Localization. Proceedings of the IEEE International Conference on Computer Vision.
+\end{enumerate}
+
+\end{document}
+
+
