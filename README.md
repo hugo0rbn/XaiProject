@@ -1,5 +1,10 @@
 # Deepfake Audio Detector with XAI
 
+## Files not in repo
+- chexpert_convnextv2_tiny_384
+- vit_chest_xray
+These models can be downloaded using the notebook HF_model_downloader
+
 ## Quick Start
 
 ```bash
